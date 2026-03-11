@@ -6,6 +6,7 @@ use Exception;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\DB;
 use ZipArchive;
 
 class ClientSyncService
@@ -31,7 +32,7 @@ class ClientSyncService
         try {
             $response = Http::withHeaders([
                 'X-Sync-Token' => $this->apiToken,
-            ])->post($this->serverUrl . '/api/sync/download-all');
+            ])->withoutVerifying()->post($this->serverUrl . '/api/sync/download-all');
 
             if ($response->failed()) {
                 throw new Exception('Download failed: ' . $response->body());
@@ -70,7 +71,7 @@ class ClientSyncService
 
             $response = Http::withHeaders([
                 'X-Sync-Token' => $this->apiToken,
-            ])->post($this->serverUrl . '/api/sync/get-schema', $payload);
+            ])->withoutVerifying()->post($this->serverUrl . '/api/sync/get-schema', $payload);
 
             if ($response->failed()) {
                 throw new Exception('Failed to fetch schema: ' . $response->body());
@@ -99,6 +100,50 @@ class ClientSyncService
                         }
                     });
                 }
+            }
+
+            return ['status' => 'success', 'log' => $log];
+
+        } catch (Exception $e) {
+            return ['status' => 'error', 'message' => $e->getMessage()];
+        }
+    }
+
+    /**
+     * Получает данные БД и обновляет/создает записи.
+     */
+    public function syncData(array $targetTables = []): array
+    {
+        try {
+            $payload = empty($targetTables) ? [] : ['tables' => $targetTables];
+
+            $response = Http::withHeaders([
+                'X-Sync-Token' => $this->apiToken,
+            ])->withoutVerifying()->post($this->serverUrl . '/api/sync/get-data', $payload);
+
+            if ($response->failed()) {
+                throw new Exception('Failed to fetch data: ' . $response->body());
+            }
+
+            $remoteData = $response->json();
+            $log = [];
+
+            foreach ($remoteData as $tableName => $rows) {
+                if (!Schema::hasTable($tableName)) {
+                    $log[] = "Table {$tableName} does not exist locally. Skipping data sync.";
+                    continue;
+                }
+
+                foreach ($rows as $row) {
+                    $rowArray = (array) $row;
+                    if (isset($rowArray['id'])) {
+                        DB::table($tableName)->updateOrInsert(
+                            ['id' => $rowArray['id']],
+                            $rowArray
+                        );
+                    }
+                }
+                $log[] = "Synced data for table: {$tableName}";
             }
 
             return ['status' => 'success', 'log' => $log];
