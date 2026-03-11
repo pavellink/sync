@@ -16,7 +16,7 @@ class ClientSyncService
 
     public function __construct()
     {
-        $this->serverUrl = rtrim(env('SYNC_SERVER_URL', ''), '\/');
+        $this->serverUrl = rtrim(env('SYNC_SERVER_URL', ''), '\\/');
         $this->apiToken = env('SYNC_API_TOKEN', '');
 
         if (empty($this->serverUrl) || empty($this->apiToken)) {
@@ -164,9 +164,17 @@ class ClientSyncService
      */
     protected function normalizeType(string $type): string
     {
-        $type = strtolower(preg_replace('/\(.*\)/', '', $type));
-        if ($type === 'integer') return 'int';
-        if ($type === 'string') return 'varchar';
+        $type = strtolower($type);
+        
+        $type = preg_replace('/^string/', 'varchar', $type);
+        $type = preg_replace('/^integer/', 'int', $type);
+
+        // Убираем размерность для всех типов, КРОМЕ varchar и char, 
+        // чтобы корректно сравнивать изменения длины (например, varchar(255) -> varchar(555))
+        if (!str_starts_with($type, 'varchar') && !str_starts_with($type, 'char')) {
+            $type = preg_replace('/\(.*\)/', '', $type);
+        }
+
         return $type;
     }
 
