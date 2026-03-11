@@ -43,7 +43,6 @@ class ClientSyncService
 
             $zip = new ZipArchive;
             if ($zip->open($tempPath) === true) {
-                // Распаковка в корень проекта (base_path)
                 $zip->extractTo(base_path());
                 $zip->close();
             } else {
@@ -82,7 +81,6 @@ class ClientSyncService
 
             foreach ($remoteSchema as $tableName => $columns) {
                 if (!Schema::hasTable($tableName)) {
-                    // Создание таблицы, если её нет
                     Schema::create($tableName, function (Blueprint $table) use ($columns, &$log, $tableName) {
                         foreach ($columns as $name => $type) {
                             $this->addColumn($table, $name, $type);
@@ -90,7 +88,6 @@ class ClientSyncService
                         $log[] = "Created table: {$tableName}";
                     });
                 } else {
-                    // Обновление таблицы (добавление новых колонок или изменение существующих)
                     Schema::table($tableName, function (Blueprint $table) use ($columns, $tableName, &$log) {
                         foreach ($columns as $name => $type) {
                             if (!Schema::hasColumn($tableName, $name)) {
@@ -160,30 +157,30 @@ class ClientSyncService
     }
 
     /**
-     * Нормализует тип колонки для сравнения.
+     * Нормализует тип колонки для корректного сравнения локального и удаленного состояния.
      */
     protected function normalizeType(string $type): string
     {
         $type = strtolower($type);
         
+        // Маппинг синонимов
         $type = preg_replace('/^string/', 'varchar', $type);
         $type = preg_replace('/^integer/', 'int', $type);
 
-        // Убираем размерность для всех типов, КРОМЕ varchar и char, 
-        // чтобы корректно сравнивать изменения длины (например, varchar(255) -> varchar(555))
-        if (!str_starts_with($type, 'varchar') && !str_starts_with($type, 'char')) {
+        // Для типов TEXT и подобных убираем размерность, чтобы избежать ложных срабатываний
+        if (!str_contains($type, 'varchar') && !str_contains($type, 'char')) {
             $type = preg_replace('/\(.*\)/', '', $type);
         }
 
-        return $type;
+        return trim($type);
     }
 
     /**
-     * Хелпер для маппинга типов данных.
+     * Хелпер для маппинга типов данных и применения изменений.
      */
     protected function addColumn(Blueprint $table, string $name, string $type, bool $change = false): void
     {
-        // Если это id, сразу делаем его первичным ключом для правильной структуры
+        // Первичный ключ ID обрабатывается отдельно
         if ($name === 'id' && !$change) {
             $table->id();
             return;
@@ -195,55 +192,62 @@ class ClientSyncService
         switch ($baseType) {
             case 'int':
             case 'integer':
-                $column = $table->integer($name)->nullable();
+                $column = $table->integer($name);
                 break;
             case 'bigint':
-                $column = $table->bigInteger($name)->nullable();
+                $column = $table->bigInteger($name);
                 break;
             case 'tinyint':
             case 'boolean':
-                $column = $table->boolean($name)->nullable();
+                $column = $table->boolean($name);
                 break;
             case 'varchar':
             case 'string':
                 preg_match('/\((\d+)\)/', $type, $matches);
                 $length = $matches[1] ?? 255;
-                $column = $table->string($name, (int)$length)->nullable();
+                $column = $table->string($name, (int)$length);
                 break;
             case 'text':
-                $column = $table->text($name)->nullable();
+                $column = $table->text($name);
                 break;
             case 'mediumtext':
-                $column = $table->mediumText($name)->nullable();
+                $column = $table->mediumText($name);
                 break;
             case 'longtext':
-                $column = $table->longText($name)->nullable();
+                $column = $table->longText($name);
                 break;
             case 'date':
-                $column = $table->date($name)->nullable();
+                $column = $table->date($name);
                 break;
             case 'datetime':
-                $column = $table->dateTime($name)->nullable();
+                $column = $table->dateTime($name);
                 break;
             case 'timestamp':
-                $column = $table->timestamp($name)->nullable();
+                $column = $table->timestamp($name);
                 break;
             case 'float':
-                $column = $table->float($name)->nullable();
+                $column = $table->float($name);
                 break;
             case 'decimal':
-                $column = $table->decimal($name, 10, 2)->nullable();
+                $column = $table->decimal($name, 10, 2);
                 break;
             case 'json':
-                $column = $table->json($name)->nullable();
+                $column = $table->json($name);
                 break;
             default:
-                $column = $table->string($name)->nullable();
+                $column = $table->string($name);
                 break;
         }
 
-        if ($change && $column) {
-            $column->change();
+        if ($column) {
+            // Исправление: Первичный ключ не может быть nullable
+            if ($name !== 'id') {
+                $column->nullable();
+            }
+
+            if ($change) {
+                $column->change();
+            }
         }
     }
 }
