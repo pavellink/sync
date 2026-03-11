@@ -24,9 +24,6 @@ class ClientSyncService
         }
     }
 
-    /**
-     * Скачивает архив с файлами и распаковывает в корень проекта.
-     */
     public function syncFiles(): array
     {
         try {
@@ -49,39 +46,29 @@ class ClientSyncService
                 throw new Exception('Failed to open ZIP archive.');
             }
 
-            if (file_exists($tempPath)) {
-                unlink($tempPath);
-            }
+            if (file_exists($tempPath)) unlink($tempPath);
 
             return ['status' => 'success', 'message' => 'Files synced successfully.'];
-
         } catch (Exception $e) {
             return ['status' => 'error', 'message' => $e->getMessage()];
         }
     }
 
-    /**
-     * Получает схему БД и обновляет структуру локальных таблиц.
-     */
     public function syncDatabase(array $targetTables = []): array
     {
         try {
-            $payload = empty($targetTables) ? [] : ['tables' => $targetTables];
+            $response = Http::withHeaders(['X-Sync-Token' => $this->apiToken])
+                ->withoutVerifying()
+                ->post($this->serverUrl . '/api/sync/get-schema', empty($targetTables) ? [] : ['tables' => $targetTables]);
 
-            $response = Http::withHeaders([
-                'X-Sync-Token' => $this->apiToken,
-            ])->withoutVerifying()->post($this->serverUrl . '/api/sync/get-schema', $payload);
-
-            if ($response->failed()) {
-                throw new Exception('Failed to fetch schema: ' . $response->body());
-            }
+            if ($response->failed()) throw new Exception('Failed to fetch schema: ' . $response->body());
 
             $remoteSchema = $response->json();
             $log = [];
 
             foreach ($remoteSchema as $tableName => $columns) {
                 if (!Schema::hasTable($tableName)) {
-                    Schema::create($tableName, function (Blueprint $table) use ($columns, &$log, $tableName) {
+                    Schema::create($tableName, function (Blueprint $table) use ($columns, $tableName, &$log) {
                         foreach ($columns as $name => $type) {
                             $this->addColumn($table, $name, $type);
                         }
@@ -90,164 +77,99 @@ class ClientSyncService
                 } else {
                     Schema::table($tableName, function (Blueprint $table) use ($columns, $tableName, &$log) {
                         foreach ($columns as $name => $type) {
+                            // КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Мы никогда не меняем структуру ID в существующей таблице
+                            if ($name === 'id') continue;
+
                             if (!Schema::hasColumn($tableName, $name)) {
                                 $this->addColumn($table, $name, $type);
-                                $log[] = "Added column {$name} ({$type}) to {$tableName}";
+                                $log[] = "Added column {$name} to {$tableName}";
                             } else {
                                 $localType = Schema::getColumnType($tableName, $name);
                                 if ($this->normalizeType($localType) !== $this->normalizeType($type)) {
                                     $this->addColumn($table, $name, $type, true);
-                                    $log[] = "Changed column {$name} to {$type} in {$tableName}";
+                                    $log[] = "Updated column {$name} in {$tableName} ({$localType} -> {$type})";
                                 }
                             }
                         }
                     });
                 }
             }
-
             return ['status' => 'success', 'log' => $log];
-
         } catch (Exception $e) {
             return ['status' => 'error', 'message' => $e->getMessage()];
         }
     }
 
-    /**
-     * Получает данные БД и обновляет/создает записи.
-     */
     public function syncData(array $targetTables = []): array
     {
         try {
-            $payload = empty($targetTables) ? [] : ['tables' => $targetTables];
+            $response = Http::withHeaders(['X-Sync-Token' => $this->apiToken])
+                ->withoutVerifying()
+                ->post($this->serverUrl . '/api/sync/get-data', empty($targetTables) ? [] : ['tables' => $targetTables]);
 
-            $response = Http::withHeaders([
-                'X-Sync-Token' => $this->apiToken,
-            ])->withoutVerifying()->post($this->serverUrl . '/api/sync/get-data', $payload);
-
-            if ($response->failed()) {
-                throw new Exception('Failed to fetch data: ' . $response->body());
-            }
+            if ($response->failed()) throw new Exception('Failed to fetch data: ' . $response->body());
 
             $remoteData = $response->json();
             $log = [];
 
             foreach ($remoteData as $tableName => $rows) {
-                if (!Schema::hasTable($tableName)) {
-                    $log[] = "Table {$tableName} does not exist locally. Skipping data sync.";
-                    continue;
-                }
+                if (!Schema::hasTable($tableName)) continue;
 
                 foreach ($rows as $row) {
                     $rowArray = (array) $row;
                     if (isset($rowArray['id'])) {
-                        DB::table($tableName)->updateOrInsert(
-                            ['id' => $rowArray['id']],
-                            $rowArray
-                        );
+                        DB::table($tableName)->updateOrInsert(['id' => $rowArray['id']], $rowArray);
                     }
                 }
-                $log[] = "Synced data for table: {$tableName}";
+                $log[] = "Synced data for {$tableName}";
             }
-
             return ['status' => 'success', 'log' => $log];
-
         } catch (Exception $e) {
             return ['status' => 'error', 'message' => $e->getMessage()];
         }
     }
 
-    /**
-     * Нормализует тип колонки для корректного сравнения локального и удаленного состояния.
-     */
     protected function normalizeType(string $type): string
     {
         $type = strtolower($type);
+        $type = str_replace(['integer', 'string'], ['int', 'varchar'], $type);
         
-        // Маппинг синонимов
-        $type = preg_replace('/^string/', 'varchar', $type);
-        $type = preg_replace('/^integer/', 'int', $type);
-
-        // Для типов TEXT и подобных убираем размерность, чтобы избежать ложных срабатываний
-        if (!str_contains($type, 'varchar') && !str_contains($type, 'char')) {
+        // Убираем длину (11) для интов, но оставляем для varchar, чтобы ловить расширение полей
+        if (!str_contains($type, 'varchar')) {
             $type = preg_replace('/\(.*\)/', '', $type);
         }
-
         return trim($type);
     }
 
-    /**
-     * Хелпер для маппинга типов данных и применения изменений.
-     */
     protected function addColumn(Blueprint $table, string $name, string $type, bool $change = false): void
     {
-        // Первичный ключ ID обрабатывается отдельно
         if ($name === 'id' && !$change) {
             $table->id();
             return;
         }
 
         $baseType = strtolower(preg_replace('/\(.*\)/', '', $type));
-        $column = null;
+        $column = match ($baseType) {
+            'int', 'integer' => $table->integer($name),
+            'bigint'         => $table->bigInteger($name),
+            'boolean', 'tinyint' => $table->boolean($name),
+            'text'           => $table->text($name),
+            'mediumtext'     => $table->mediumText($name),
+            'longtext'       => $table->longText($name),
+            'date'           => $table->date($name),
+            'datetime'       => $table->dateTime($name),
+            'timestamp'      => $table->timestamp($name),
+            'json'           => $table->json($name),
+            'varchar', 'string' => (function() use ($table, $name, $type) {
+                preg_match('/\((\d+)\)/', $type, $m);
+                return $table->string($name, (int)($m[1] ?? 255));
+            })(),
+            default          => $table->string($name),
+        };
 
-        switch ($baseType) {
-            case 'int':
-            case 'integer':
-                $column = $table->integer($name);
-                break;
-            case 'bigint':
-                $column = $table->bigInteger($name);
-                break;
-            case 'tinyint':
-            case 'boolean':
-                $column = $table->boolean($name);
-                break;
-            case 'varchar':
-            case 'string':
-                preg_match('/\((\d+)\)/', $type, $matches);
-                $length = $matches[1] ?? 255;
-                $column = $table->string($name, (int)$length);
-                break;
-            case 'text':
-                $column = $table->text($name);
-                break;
-            case 'mediumtext':
-                $column = $table->mediumText($name);
-                break;
-            case 'longtext':
-                $column = $table->longText($name);
-                break;
-            case 'date':
-                $column = $table->date($name);
-                break;
-            case 'datetime':
-                $column = $table->dateTime($name);
-                break;
-            case 'timestamp':
-                $column = $table->timestamp($name);
-                break;
-            case 'float':
-                $column = $table->float($name);
-                break;
-            case 'decimal':
-                $column = $table->decimal($name, 10, 2);
-                break;
-            case 'json':
-                $column = $table->json($name);
-                break;
-            default:
-                $column = $table->string($name);
-                break;
-        }
-
-        if ($column) {
-            // Исправление: Первичный ключ не может быть nullable
-            if ($name !== 'id') {
-                $column->nullable();
-            }
-
-            if ($change) {
-                $column->change();
-            }
+        if ($column && $name !== 'id') {
+            $column->nullable();
+            if ($change) $column->change();
         }
     }
 }
