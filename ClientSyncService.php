@@ -16,7 +16,7 @@ class ClientSyncService
 
     public function __construct()
     {
-        $this->serverUrl = rtrim(env('SYNC_SERVER_URL', ''), '/');
+        $this->serverUrl = rtrim(env('SYNC_SERVER_URL', ''), '\/');
         $this->apiToken = env('SYNC_API_TOKEN', '');
 
         if (empty($this->serverUrl) || empty($this->apiToken)) {
@@ -182,6 +182,12 @@ class ClientSyncService
                 break;
             case 'text':
                 $table->text($name)->nullable();
+                break;
+            case 'mediumtext':
+                $table->mediumText($name)->nullable();
+                break;
+            case 'longtext':
+                $table->longText($name)->nullable();
                 break;
             case 'date':
                 $table->date($name)->nullable();
