@@ -90,12 +90,18 @@ class ClientSyncService
                         $log[] = "Created table: {$tableName}";
                     });
                 } else {
-                    // Обновление таблицы (добавление новых колонок)
+                    // Обновление таблицы (добавление новых колонок или изменение существующих)
                     Schema::table($tableName, function (Blueprint $table) use ($columns, $tableName, &$log) {
                         foreach ($columns as $name => $type) {
                             if (!Schema::hasColumn($tableName, $name)) {
                                 $this->addColumn($table, $name, $type);
                                 $log[] = "Added column {$name} ({$type}) to {$tableName}";
+                            } else {
+                                $localType = Schema::getColumnType($tableName, $name);
+                                if ($this->normalizeType($localType) !== $this->normalizeType($type)) {
+                                    $this->addColumn($table, $name, $type, true);
+                                    $log[] = "Changed column {$name} to {$type} in {$tableName}";
+                                }
                             }
                         }
                     });
@@ -154,62 +160,82 @@ class ClientSyncService
     }
 
     /**
+     * Нормализует тип колонки для сравнения.
+     */
+    protected function normalizeType(string $type): string
+    {
+        $type = strtolower(preg_replace('/\(.*\)/', '', $type));
+        if ($type === 'integer') return 'int';
+        if ($type === 'string') return 'varchar';
+        return $type;
+    }
+
+    /**
      * Хелпер для маппинга типов данных.
      */
-    protected function addColumn(Blueprint $table, string $name, string $type): void
+    protected function addColumn(Blueprint $table, string $name, string $type, bool $change = false): void
     {
         // Если это id, сразу делаем его первичным ключом для правильной структуры
-        if ($name === 'id') {
+        if ($name === 'id' && !$change) {
             $table->id();
             return;
         }
 
-        switch (strtolower($type)) {
+        $baseType = strtolower(preg_replace('/\(.*\)/', '', $type));
+        $column = null;
+
+        switch ($baseType) {
             case 'int':
             case 'integer':
-                $table->integer($name)->nullable();
+                $column = $table->integer($name)->nullable();
                 break;
             case 'bigint':
-                $table->bigInteger($name)->nullable();
+                $column = $table->bigInteger($name)->nullable();
                 break;
             case 'tinyint':
             case 'boolean':
-                $table->boolean($name)->nullable();
+                $column = $table->boolean($name)->nullable();
                 break;
             case 'varchar':
             case 'string':
-                $table->string($name)->nullable();
+                preg_match('/\((\d+)\)/', $type, $matches);
+                $length = $matches[1] ?? 255;
+                $column = $table->string($name, (int)$length)->nullable();
                 break;
             case 'text':
-                $table->text($name)->nullable();
+                $column = $table->text($name)->nullable();
                 break;
             case 'mediumtext':
-                $table->mediumText($name)->nullable();
+                $column = $table->mediumText($name)->nullable();
                 break;
             case 'longtext':
-                $table->longText($name)->nullable();
+                $column = $table->longText($name)->nullable();
                 break;
             case 'date':
-                $table->date($name)->nullable();
+                $column = $table->date($name)->nullable();
                 break;
             case 'datetime':
-                $table->dateTime($name)->nullable();
+                $column = $table->dateTime($name)->nullable();
                 break;
             case 'timestamp':
-                $table->timestamp($name)->nullable();
+                $column = $table->timestamp($name)->nullable();
                 break;
             case 'float':
-                $table->float($name)->nullable();
+                $column = $table->float($name)->nullable();
                 break;
             case 'decimal':
-                $table->decimal($name, 10, 2)->nullable();
+                $column = $table->decimal($name, 10, 2)->nullable();
                 break;
             case 'json':
-                $table->json($name)->nullable();
+                $column = $table->json($name)->nullable();
                 break;
             default:
-                $table->string($name)->nullable();
+                $column = $table->string($name)->nullable();
                 break;
+        }
+
+        if ($change && $column) {
+            $column->change();
         }
     }
 }
